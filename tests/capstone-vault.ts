@@ -10,7 +10,6 @@ describe("capstone_vault", () => {
   const program = anchor.workspace.CapstoneVault as Program<CapstoneVault>;
   const user = provider.wallet.publicKey;
 
-  // Derive PDAs
   const [vaultStatePda, stateBump] =
     anchor.web3.PublicKey.findProgramAddressSync(
       [Buffer.from("state"), user.toBuffer()],
@@ -23,12 +22,10 @@ describe("capstone_vault", () => {
   );
 
   before(async () => {
-    // Airdrop for fees
     await provider.connection.requestAirdrop(
       user,
       10 * anchor.web3.LAMPORTS_PER_SOL,
     );
-    // Wait for confirmation
     await new Promise((resolve) => setTimeout(resolve, 1000));
   });
 
@@ -54,7 +51,7 @@ describe("capstone_vault", () => {
   });
 
   it("Deposit SOL into the vault", async () => {
-    const depositAmount = 1 * anchor.web3.LAMPORTS_PER_SOL; // 1 SOL
+    const depositAmount = 1 * anchor.web3.LAMPORTS_PER_SOL;
 
     const initialVaultBalance = await provider.connection.getBalance(vaultPda);
     const initialUserBalance = await provider.connection.getBalance(user);
@@ -73,14 +70,13 @@ describe("capstone_vault", () => {
     const finalUserBalance = await provider.connection.getBalance(user);
 
     expect(finalVaultBalance).to.equal(initialVaultBalance + depositAmount);
-    // User balance decreases by amount - fees
     expect(finalUserBalance).to.equal(
       initialUserBalance - depositAmount - 5000,
     );
   });
 
   it("Withdraw SOL from the vault", async () => {
-    const withdrawAmount = 0.5 * anchor.web3.LAMPORTS_PER_SOL; // 0.5 SOL
+    const withdrawAmount = 0.5 * anchor.web3.LAMPORTS_PER_SOL;
 
     const initialVaultBalance = await provider.connection.getBalance(vaultPda);
     const initialUserBalance = await provider.connection.getBalance(user);
@@ -99,7 +95,6 @@ describe("capstone_vault", () => {
     const finalUserBalance = await provider.connection.getBalance(user);
 
     expect(finalVaultBalance).to.equal(initialVaultBalance - withdrawAmount);
-    // User balance increases by amount - fees
     expect(finalUserBalance).to.equal(
       initialUserBalance + withdrawAmount - 5000,
     );
@@ -124,16 +119,8 @@ describe("capstone_vault", () => {
 
     const finalUserBalance = await provider.connection.getBalance(user);
 
-    // Vault should be 0
     expect(await provider.connection.getBalance(vaultPda)).to.equal(0);
-
-    // VaultState should be closed (null)
-    const vaultStateInfo = await provider.connection.getAccountInfo(
-      vaultStatePda,
-    );
-    expect(vaultStateInfo).to.be.null;
-
-    // User gets back the remaining balance - fees
+    expect(await provider.connection.getAccountInfo(vaultStatePda)).to.be.null;
     expect(finalUserBalance).to.equal(
       initialUserBalance +
         initialVaultBalance +
@@ -141,38 +128,46 @@ describe("capstone_vault", () => {
         5000,
     );
   });
+});
 
-  it("Restricted vault enforces time lock and spend limit", async () => {
-    const restrictedUser = anchor.web3.Keypair.generate();
-    const oneSol = anchor.web3.LAMPORTS_PER_SOL;
+describe("capstone_vault_restricted", () => {
+  const provider = anchor.AnchorProvider.env();
+  anchor.setProvider(provider);
 
+  const program = anchor.workspace.CapstoneVault as Program<CapstoneVault>;
+
+  const restrictedUser = anchor.web3.Keypair.generate();
+  const oneSol = anchor.web3.LAMPORTS_PER_SOL;
+  const lockDurationSeconds = 2;
+  const spendLimit = 1 * oneSol;
+  const spendPeriodSeconds = 3;
+
+  const [restrictedVaultStatePda] =
+    anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("state"), restrictedUser.publicKey.toBuffer()],
+      program.programId,
+    );
+
+  const [restrictedVaultPda] = anchor.web3.PublicKey.findProgramAddressSync(
+    [Buffer.from("vault"), restrictedVaultStatePda.toBuffer()],
+    program.programId,
+  );
+
+  const [restrictedVaultConfigPda] =
+    anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("config"), restrictedUser.publicKey.toBuffer()],
+      program.programId,
+    );
+
+  before(async () => {
     await provider.connection.requestAirdrop(
       restrictedUser.publicKey,
       10 * oneSol,
     );
     await new Promise((resolve) => setTimeout(resolve, 1000));
+  });
 
-    const [restrictedVaultStatePda] =
-      anchor.web3.PublicKey.findProgramAddressSync(
-        [Buffer.from("state"), restrictedUser.publicKey.toBuffer()],
-        program.programId,
-      );
-
-    const [restrictedVaultPda] = anchor.web3.PublicKey.findProgramAddressSync(
-      [Buffer.from("vault"), restrictedVaultStatePda.toBuffer()],
-      program.programId,
-    );
-
-    const [restrictedVaultConfigPda] =
-      anchor.web3.PublicKey.findProgramAddressSync(
-        [Buffer.from("config"), restrictedUser.publicKey.toBuffer()],
-        program.programId,
-      );
-
-    const lockDurationSeconds = 2;
-    const spendLimit = 1 * oneSol;
-    const spendPeriodSeconds = 3;
-
+  it("Initialize restricted vault", async () => {
     await program.methods
       .initializeRestricted(
         new anchor.BN(lockDurationSeconds),
@@ -189,8 +184,22 @@ describe("capstone_vault", () => {
       .signers([restrictedUser])
       .rpc();
 
+    const vaultConfig = await program.account.vaultConfig.fetch(
+      restrictedVaultConfigPda,
+    );
+    expect(vaultConfig.spendLimit.toNumber()).to.equal(spendLimit);
+    expect(vaultConfig.periodSeconds.toNumber()).to.equal(spendPeriodSeconds);
+    expect(vaultConfig.withdrawnThisPeriod.toNumber()).to.equal(0);
+  });
+
+  it("Deposit into restricted vault", async () => {
+    const depositAmount = 2 * oneSol;
+    const initialBalance = await provider.connection.getBalance(
+      restrictedVaultPda,
+    );
+
     await program.methods
-      .deposit(new anchor.BN(2 * oneSol))
+      .deposit(new anchor.BN(depositAmount))
       .accountsStrict({
         user: restrictedUser.publicKey,
         vault: restrictedVaultPda,
@@ -200,7 +209,14 @@ describe("capstone_vault", () => {
       .signers([restrictedUser])
       .rpc();
 
-    let failedBeforeUnlock = false;
+    const finalBalance = await provider.connection.getBalance(
+      restrictedVaultPda,
+    );
+    expect(finalBalance).to.equal(initialBalance + depositAmount);
+  });
+
+  it("Rejects withdrawal before time lock expires", async () => {
+    let failed = false;
     try {
       await program.methods
         .withdrawRestricted(new anchor.BN(0.5 * oneSol))
@@ -214,14 +230,17 @@ describe("capstone_vault", () => {
         .signers([restrictedUser])
         .rpc();
     } catch {
-      failedBeforeUnlock = true;
+      failed = true;
     }
-    expect(failedBeforeUnlock).to.equal(true);
+    expect(failed).to.equal(true);
+  });
 
+  it("Allows withdrawal after time lock expires, rejects when spend limit exceeded", async () => {
     await new Promise((resolve) =>
       setTimeout(resolve, (lockDurationSeconds + 1) * 1000),
     );
 
+    // First withdrawal — within limit
     await program.methods
       .withdrawRestricted(new anchor.BN(0.6 * oneSol))
       .accountsStrict({
@@ -234,6 +253,7 @@ describe("capstone_vault", () => {
       .signers([restrictedUser])
       .rpc();
 
+    // Second withdrawal — would exceed 1 SOL limit (0.6 + 0.5 = 1.1)
     let failedSpendLimit = false;
     try {
       await program.methods
@@ -251,13 +271,20 @@ describe("capstone_vault", () => {
       failedSpendLimit = true;
     }
     expect(failedSpendLimit).to.equal(true);
+  });
 
+  it("Allows withdrawal after spend period resets", async () => {
     await new Promise((resolve) =>
       setTimeout(resolve, (spendPeriodSeconds + 1) * 1000),
     );
 
+    const initialBalance = await provider.connection.getBalance(
+      restrictedVaultPda,
+    );
+    const withdrawAmount = 0.5 * oneSol;
+
     await program.methods
-      .withdrawRestricted(new anchor.BN(0.5 * oneSol))
+      .withdrawRestricted(new anchor.BN(withdrawAmount))
       .accountsStrict({
         user: restrictedUser.publicKey,
         vault: restrictedVaultPda,
@@ -267,6 +294,20 @@ describe("capstone_vault", () => {
       })
       .signers([restrictedUser])
       .rpc();
+
+    const finalBalance = await provider.connection.getBalance(
+      restrictedVaultPda,
+    );
+    expect(finalBalance).to.equal(initialBalance - withdrawAmount);
+  });
+
+  it("Close restricted vault", async () => {
+    const initialUserBalance = await provider.connection.getBalance(
+      restrictedUser.publicKey,
+    );
+    const initialVaultBalance = await provider.connection.getBalance(
+      restrictedVaultPda,
+    );
 
     await program.methods
       .closeRestricted()
@@ -279,5 +320,20 @@ describe("capstone_vault", () => {
       })
       .signers([restrictedUser])
       .rpc();
+
+    expect(await provider.connection.getBalance(restrictedVaultPda)).to.equal(
+      0,
+    );
+    expect(await provider.connection.getAccountInfo(restrictedVaultStatePda)).to
+      .be.null;
+    expect(await provider.connection.getAccountInfo(restrictedVaultConfigPda))
+      .to.be.null;
+
+    const finalUserBalance = await provider.connection.getBalance(
+      restrictedUser.publicKey,
+    );
+    expect(finalUserBalance).to.be.greaterThan(
+      initialUserBalance + initialVaultBalance - 5000,
+    );
   });
 });
