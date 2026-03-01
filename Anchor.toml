@@ -8,6 +8,9 @@ skip-lint = false
 [programs.localnet]
 capstone_vault = "FQSsCaaeyjJSb8uZi3hsWkKSJNM3CH9eHahqZy5FapW1"
 
+[programs.devnet]
+capstone_vault = "FQSsCaaeyjJSb8uZi3hsWkKSJNM3CH9eHahqZy5FapW1"
+
 [registry]
 url = "https://api.apr.dev"
 
