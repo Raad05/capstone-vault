@@ -1,203 +1,83 @@
-# Capstone Vault Constraint Logic
+# Capstone Vault
 
-The program enforces constraints in two layers:
+## Overview
 
-1. **Anchor account constraints** (`#[account(...)]`)  
-   These are checked before instruction logic runs.
-2. **Runtime guards** (`require!(...)`)  
-   These enforce business rules that depend on runtime values.
+The program has two modes. Each user chooses one at initialization:
 
-## PDA and Seed Model
+- **Basic mode** — simple deposit/withdraw with no restrictions.
+- **Restricted mode** — adds an optional time lock (no withdrawals until a set time) and an optional spend limit (max SOL withdrawable per rolling period).
 
-The program uses fixed seed prefixes from `src/constants.rs`:
+Constraints are enforced in two layers:
 
-- `STATE_SEED = "state"`: user state PDA namespace
-- `VAULT_SEED = "vault"`: vault PDA namespace
-- `CONFIG_SEED = "config"`: restricted-config PDA namespace
+1. **Anchor account constraints** (`#[account(...)]`) — verified before the instruction runs (correct PDA, correct owner, writable, etc.)
+2. **Runtime guards** (`require!(...)`) — business rules checked inside the instruction (lock expired? spend limit OK? enough funds?)
 
-Per user:
+---
 
-- `vault_state` PDA: `[STATE_SEED, user_pubkey]`
-- `vault` PDA: `[VAULT_SEED, vault_state_pubkey]`
-- `vault_config` PDA (restricted mode): `[CONFIG_SEED, user_pubkey]`
+## Accounts (PDAs)
 
-This structure guarantees deterministic ownership mapping:
+All accounts are derived from the user's public key, so each user has their own isolated set:
 
-- Only the correct user's state/config PDAs are accepted
-- The vault account is tied to the exact `vault_state`
-- Signer seeds can only be derived from valid stored bumps
+| Account        | Seeds                    | Purpose                                        |
+| -------------- | ------------------------ | ---------------------------------------------- |
+| `vault_state`  | `["state", user]`        | Stores PDA bumps                               |
+| `vault`        | `["vault", vault_state]` | Holds the SOL                                  |
+| `vault_config` | `["config", user]`       | Stores lock/spend rules (restricted mode only) |
 
-## Shared Constraint Patterns
+---
 
-These patterns appear in multiple instructions:
+## Instructions
 
-- `user: Signer`: caller must sign the transaction
-- `seeds + bump`: incoming accounts must match expected PDA derivations
-- `mut`: account is writable where state or lamports change
-- `close = user`: account rent is reclaimed by `user` on close
+### Basic Mode
 
-These checks prevent account substitution attacks (passing someone else's PDA), unauthorized writes, and rent leakage.
+**`initialize`**
 
-## Instruction-by-Instruction Rules
+- Creates `vault_state` and funds `vault` with the rent-exempt minimum.
 
-## `initialize`
+**`deposit`**
 
-Account constraints:
+- Transfers SOL from user to vault. No restrictions.
 
-- `vault_state` is **created** with:
-  - payer = `user`
-  - seeds = `[STATE_SEED, user]`
-  - allocated space for `VaultState`
-- `vault` must be the PDA derived from `[VAULT_SEED, vault_state]`
+**`withdraw`**
 
-Runtime logic:
+- Transfers SOL from vault to user. Requires vault has enough funds.
 
-- computes required rent exemption for the vault account data length
-- transfers that rent-exempt minimum from `user` to `vault`
-- stores the bumps in `vault_state` for future signer derivation
+**`close`**
 
-Security intent:
+- Drains all vault SOL back to user and closes `vault_state` (rent returned).
 
-- ensures vault PDA starts rent-safe
-- pins future authority to saved bump values
+### Restricted Mode
 
-## `initialize_restricted`
+**`initialize_restricted`**
 
-Account constraints:
+- Same as `initialize`, but also creates `vault_config` with user-defined rules:
+  - `lock_duration_seconds` — how long until withdrawals are allowed (0 = no lock)
+  - `spend_limit` — max lamports withdrawable per period (0 = no limit)
+  - `spend_period_seconds` — rolling window for the spend limit (must be > 0 if limit is set)
 
-- same `vault_state` and `vault` rules as `initialize`
-- creates `vault_config` at `[CONFIG_SEED, user]`
+**`deposit`** — same as basic mode.
 
-Runtime guards:
+**`withdraw_restricted`**
 
-- `lock_duration_seconds >= 0`  
-  Prevents nonsensical negative lock time.
-- if `spend_limit > 0`, then `spend_period_seconds > 0`  
-  A limit must have a real period window.
-- if `spend_limit == 0`, then `spend_period_seconds == 0`  
-  Prevents partial/ambiguous config.
-- `checked_add` for lock timestamp  
-  Prevents integer overflow.
+- Checks in order:
+  1. Vault has sufficient funds.
+  2. Time lock has expired (if set).
+  3. Withdrawal stays within the spend limit for the current period (if set). Period auto-resets when expired.
 
-Runtime initialization:
+**`close_restricted`**
 
-- funds vault rent exemption
-- saves state/config bumps
-- stores lock/period/limit fields and resets period withdrawal counter
+- Same as `close`, but also closes `vault_config`.
 
-Security intent:
+---
 
-- ensures restricted mode starts in a self-consistent configuration
-- blocks overflow-based bypasses
+## Errors
 
-## `deposit`
-
-Account constraints:
-
-- vault PDA must match `vault_state`
-- `vault_state` PDA must match calling user
-
-Runtime logic:
-
-- transfers `amount` lamports from `user` to `vault`
-
-Security intent:
-
-- caller can only deposit into their own mapped vault context
-- prevents directing funds to an arbitrary PDA via account substitution
-
-## `withdraw`
-
-Account constraints:
-
-- same user-state-vault linkage as `deposit`
-
-Runtime guard:
-
-- `vault.lamports() >= amount`  
-  Prevents underfunded withdrawal attempts.
-
-Signer derivation:
-
-- program signs transfer from vault using seeds:
-  `[VAULT_SEED, vault_state_pubkey, vault_bump]`
-
-Security intent:
-
-- only the canonical vault PDA can authorize payout
-- avoids accidental or malicious overdraft attempts
-
-## `withdraw_restricted`
-
-Account constraints:
-
-- same constraints as `withdraw`
-- plus `vault_config` PDA tied to caller user
-
-Runtime guards:
-
-- sufficient vault funds
-- if time lock is enabled (`lock_until_ts > 0`), current time must be past lock
-- if spend limit is enabled:
-  - period must be positive
-  - period end computation uses `checked_add` (overflow-safe)
-  - period auto-resets when expired
-  - `withdrawn_this_period + amount` uses `checked_add`
-  - new total must remain `<= spend_limit`
-
-State updates:
-
-- updates `period_start_ts` and `withdrawn_this_period` when period rolls
-- persists updated withdrawal counter after successful transfer
-
-Security intent:
-
-- enforces lock and rate-limiting policy on-chain
-- keeps period accounting consistent and overflow-safe
-
-## `close`
-
-Account constraints:
-
-- user-linked `vault_state`
-- `close = user` on `vault_state`
-- vault PDA derived from that state
-
-Runtime logic:
-
-- transfers all vault lamports back to `user`
-- closes `vault_state` (rent returned to user by Anchor)
-
-Security intent:
-
-- allows clean teardown while preserving ownership boundaries
-
-## `close_restricted`
-
-Account constraints:
-
-- same as `close`
-- also requires user-linked `vault_config` with `close = user`
-
-Runtime logic:
-
-- transfers full vault balance to user
-- closes both `vault_state` and `vault_config`
-
-Security intent:
-
-- prevents leftover config/state accounts after restricted vault teardown
-
-## Error Semantics
-
-`src/error.rs` defines explicit failure reasons:
-
-- `VaultStillLocked`: attempted withdrawal before timelock expires
-- `SpendLimitExceeded`: period spending exceeds configured cap
-- `PeriodRequiredForSpendLimit`: limit set without valid positive period
-- `InvalidLockDuration`: negative lock duration passed
-- `InvalidSpendLimitConfig`: inconsistent limit/period setup
-- `InsufficientVaultFunds`: requested more than vault balance
-- `NumericalOverflow`: safe arithmetic overflow detected
-
-These errors make policy failures deterministic and easier to debug from clients/tests.
+| Error                         | Cause                                         |
+| ----------------------------- | --------------------------------------------- |
+| `VaultStillLocked`            | Withdrawal attempted before time lock expires |
+| `SpendLimitExceeded`          | Withdrawal would exceed the period cap        |
+| `PeriodRequiredForSpendLimit` | Spend limit set but period is 0               |
+| `InvalidLockDuration`         | Negative lock duration passed                 |
+| `InvalidSpendLimitConfig`     | Period set but spend limit is 0               |
+| `InsufficientVaultFunds`      | Requested more than vault balance             |
+| `NumericalOverflow`           | Safe arithmetic overflow detected             |
