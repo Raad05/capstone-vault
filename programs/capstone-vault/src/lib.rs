@@ -3,6 +3,16 @@ use anchor_lang::{
     system_program::{transfer, Transfer},
 };
 
+pub mod constants;
+pub mod error;
+pub mod instructions;
+pub mod state;
+
+use constants::{CONFIG_SEED, STATE_SEED, VAULT_SEED};
+use error::VaultError;
+use instructions::*;
+use state::{VaultConfig, VaultState};
+
 declare_id!("FQSsCaaeyjJSb8uZi3hsWkKSJNM3CH9eHahqZy5FapW1");
 
 #[program]
@@ -55,14 +65,14 @@ pub struct Initialize<'info> {
     #[account(
         init,
         payer = user,
-        seeds = [b"state", user.key().as_ref()], 
+        seeds = [STATE_SEED, user.key().as_ref()],
         bump,
         space = VaultState::DISCRIMINATOR.len() + VaultState::INIT_SPACE,
     )]
     pub vault_state: Account<'info, VaultState>,
     #[account(
         mut,
-        seeds = [b"vault", vault_state.key().as_ref()],
+        seeds = [VAULT_SEED, vault_state.key().as_ref()],
         bump,
     )]
     pub vault: SystemAccount<'info>,
@@ -71,10 +81,8 @@ pub struct Initialize<'info> {
 
 impl<'info> Initialize<'info> {
     pub fn initialize(&mut self, bumps: &InitializeBumps) -> Result<()> {
-        // Get the amount of lamports needed to make the vault rent exempt
         let rent_exempt = Rent::get()?.minimum_balance(self.vault.to_account_info().data_len());
 
-        // Transfer the rent-exempt amount from the user to the vault
         let cpi_program = self.system_program.to_account_info();
         let cpi_accounts = Transfer {
             from: self.user.to_account_info(),
@@ -82,7 +90,6 @@ impl<'info> Initialize<'info> {
         };
 
         let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
-
         transfer(cpi_ctx, rent_exempt)?;
 
         self.vault_state.vault_bump = bumps.vault;
@@ -99,21 +106,21 @@ pub struct InitializeRestricted<'info> {
     #[account(
         init,
         payer = user,
-        seeds = [b"state", user.key().as_ref()],
+        seeds = [STATE_SEED, user.key().as_ref()],
         bump,
         space = VaultState::DISCRIMINATOR.len() + VaultState::INIT_SPACE,
     )]
     pub vault_state: Account<'info, VaultState>,
     #[account(
         mut,
-        seeds = [b"vault", vault_state.key().as_ref()],
+        seeds = [VAULT_SEED, vault_state.key().as_ref()],
         bump,
     )]
     pub vault: SystemAccount<'info>,
     #[account(
         init,
         payer = user,
-        seeds = [b"config", user.key().as_ref()],
+        seeds = [CONFIG_SEED, user.key().as_ref()],
         bump,
         space = VaultConfig::DISCRIMINATOR.len() + VaultConfig::INIT_SPACE,
     )]
@@ -173,310 +180,4 @@ impl<'info> InitializeRestricted<'info> {
 
         Ok(())
     }
-}
-
-#[derive(Accounts)]
-pub struct Deposit<'info> {
-    #[account(mut)]
-    pub user: Signer<'info>,
-    #[account(
-        mut,
-        seeds = [b"vault", vault_state.key().as_ref()], 
-        bump = vault_state.vault_bump,
-    )]
-    pub vault: SystemAccount<'info>,
-    #[account(
-        seeds = [b"state", user.key().as_ref()],
-        bump = vault_state.state_bump,
-    )]
-    pub vault_state: Account<'info, VaultState>,
-    pub system_program: Program<'info, System>,
-}
-
-impl<'info> Deposit<'info> {
-    pub fn deposit(&mut self, amount: u64) -> Result<()> {
-        let cpi_program = self.system_program.to_account_info();
-
-        let cpi_accounts = Transfer {
-            from: self.user.to_account_info(),
-            to: self.vault.to_account_info(),
-        };
-
-        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
-
-        transfer(cpi_ctx, amount)?;
-
-        Ok(())
-    }
-}
-
-#[derive(Accounts)]
-pub struct Withdraw<'info> {
-    #[account(mut)]
-    pub user: Signer<'info>,
-    #[account(
-        mut,
-        seeds = [b"vault", vault_state.key().as_ref()],
-        bump = vault_state.vault_bump,
-    )]
-    pub vault: SystemAccount<'info>,
-    #[account(seeds = [b"state", user.key().as_ref()], bump = vault_state.state_bump,)]
-    pub vault_state: Account<'info, VaultState>,
-    pub system_program: Program<'info, System>,
-}
-
-impl<'info> Withdraw<'info> {
-    pub fn withdraw(&mut self, amount: u64) -> Result<()> {
-        require!(
-            self.vault.lamports() >= amount,
-            VaultError::InsufficientVaultFunds
-        );
-
-        let cpi_program = self.system_program.to_account_info();
-
-        let cpi_accounts = Transfer {
-            from: self.vault.to_account_info(),
-            to: self.user.to_account_info(),
-        };
-
-        let seeds = &[
-            b"vault",
-            self.vault_state.to_account_info().key.as_ref(),
-            &[self.vault_state.vault_bump],
-        ];
-
-        let signer_seeds = &[&seeds[..]];
-
-        let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer_seeds);
-
-        transfer(cpi_ctx, amount)?;
-
-        Ok(())
-    }
-}
-
-#[derive(Accounts)]
-pub struct WithdrawRestricted<'info> {
-    #[account(mut)]
-    pub user: Signer<'info>,
-    #[account(
-        mut,
-        seeds = [b"vault", vault_state.key().as_ref()],
-        bump = vault_state.vault_bump,
-    )]
-    pub vault: SystemAccount<'info>,
-    #[account(seeds = [b"state", user.key().as_ref()], bump = vault_state.state_bump,)]
-    pub vault_state: Account<'info, VaultState>,
-    #[account(
-        mut,
-        seeds = [b"config", user.key().as_ref()],
-        bump = vault_config.config_bump,
-    )]
-    pub vault_config: Account<'info, VaultConfig>,
-    pub system_program: Program<'info, System>,
-}
-
-impl<'info> WithdrawRestricted<'info> {
-    pub fn withdraw_restricted(&mut self, amount: u64) -> Result<()> {
-        let now = Clock::get()?.unix_timestamp;
-
-        require!(
-            self.vault.lamports() >= amount,
-            VaultError::InsufficientVaultFunds
-        );
-
-        if self.vault_config.lock_until_ts > 0 {
-            require!(
-                now >= self.vault_config.lock_until_ts,
-                VaultError::VaultStillLocked
-            );
-        }
-
-        let mut new_withdrawn_this_period = self.vault_config.withdrawn_this_period;
-
-        if self.vault_config.spend_limit > 0 {
-            require!(
-                self.vault_config.period_seconds > 0,
-                VaultError::PeriodRequiredForSpendLimit
-            );
-
-            let period_end = self
-                .vault_config
-                .period_start_ts
-                .checked_add(self.vault_config.period_seconds)
-                .ok_or(VaultError::NumericalOverflow)?;
-
-            if now >= period_end {
-                self.vault_config.period_start_ts = now;
-                self.vault_config.withdrawn_this_period = 0;
-                new_withdrawn_this_period = 0;
-            }
-
-            new_withdrawn_this_period = new_withdrawn_this_period
-                .checked_add(amount)
-                .ok_or(VaultError::NumericalOverflow)?;
-
-            require!(
-                new_withdrawn_this_period <= self.vault_config.spend_limit,
-                VaultError::SpendLimitExceeded
-            );
-        }
-
-        let cpi_program = self.system_program.to_account_info();
-        let cpi_accounts = Transfer {
-            from: self.vault.to_account_info(),
-            to: self.user.to_account_info(),
-        };
-
-        let seeds = &[
-            b"vault",
-            self.vault_state.to_account_info().key.as_ref(),
-            &[self.vault_state.vault_bump],
-        ];
-        let signer_seeds = &[&seeds[..]];
-        let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer_seeds);
-
-        transfer(cpi_ctx, amount)?;
-
-        if self.vault_config.spend_limit > 0 {
-            self.vault_config.withdrawn_this_period = new_withdrawn_this_period;
-        }
-
-        Ok(())
-    }
-}
-
-#[derive(Accounts)]
-pub struct Close<'info> {
-    #[account(mut)]
-    pub user: Signer<'info>,
-    #[account(
-        mut,
-        seeds = [b"vault", vault_state.key().as_ref()],
-        bump = vault_state.vault_bump,
-    )]
-    pub vault: SystemAccount<'info>,
-    #[account(
-        mut,
-        seeds = [b"state", user.key().as_ref()],
-        bump = vault_state.state_bump,
-        close = user,
-    )]
-    pub vault_state: Account<'info, VaultState>,
-    pub system_program: Program<'info, System>,
-}
-
-impl<'info> Close<'info> {
-    pub fn close(&mut self) -> Result<()> {
-        let cpi_program = self.system_program.to_account_info();
-
-        let cpi_accounts = Transfer {
-            from: self.vault.to_account_info(),
-            to: self.user.to_account_info(),
-        };
-
-        let seeds = &[
-            b"vault",
-            self.vault_state.to_account_info().key.as_ref(),
-            &[self.vault_state.vault_bump],
-        ];
-
-        let signer_seeds = &[&seeds[..]];
-
-        let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer_seeds);
-
-        let amount = self.vault.lamports();
-        transfer(cpi_ctx, amount)?;
-
-        Ok(())
-    }
-}
-
-#[derive(Accounts)]
-pub struct CloseRestricted<'info> {
-    #[account(mut)]
-    pub user: Signer<'info>,
-    #[account(
-        mut,
-        seeds = [b"vault", vault_state.key().as_ref()],
-        bump = vault_state.vault_bump,
-    )]
-    pub vault: SystemAccount<'info>,
-    #[account(
-        mut,
-        seeds = [b"state", user.key().as_ref()],
-        bump = vault_state.state_bump,
-        close = user,
-    )]
-    pub vault_state: Account<'info, VaultState>,
-    #[account(
-        mut,
-        seeds = [b"config", user.key().as_ref()],
-        bump = vault_config.config_bump,
-        close = user,
-    )]
-    pub vault_config: Account<'info, VaultConfig>,
-    pub system_program: Program<'info, System>,
-}
-
-impl<'info> CloseRestricted<'info> {
-    pub fn close_restricted(&mut self) -> Result<()> {
-        let cpi_program = self.system_program.to_account_info();
-
-        let cpi_accounts = Transfer {
-            from: self.vault.to_account_info(),
-            to: self.user.to_account_info(),
-        };
-
-        let seeds = &[
-            b"vault",
-            self.vault_state.to_account_info().key.as_ref(),
-            &[self.vault_state.vault_bump],
-        ];
-
-        let signer_seeds = &[&seeds[..]];
-
-        let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer_seeds);
-
-        let amount = self.vault.lamports();
-        transfer(cpi_ctx, amount)?;
-
-        Ok(())
-    }
-}
-
-#[derive(InitSpace)]
-#[account]
-pub struct VaultState {
-    pub vault_bump: u8,
-    pub state_bump: u8,
-}
-
-#[derive(InitSpace)]
-#[account]
-pub struct VaultConfig {
-    pub lock_until_ts: i64,
-    pub spend_limit: u64,
-    pub period_seconds: i64,
-    pub period_start_ts: i64,
-    pub withdrawn_this_period: u64,
-    pub config_bump: u8,
-}
-
-#[error_code]
-pub enum VaultError {
-    #[msg("Vault is still time-locked.")]
-    VaultStillLocked,
-    #[msg("Withdrawal exceeds spend limit for current period.")]
-    SpendLimitExceeded,
-    #[msg("Spend limit requires a positive period.")]
-    PeriodRequiredForSpendLimit,
-    #[msg("Invalid lock duration.")]
-    InvalidLockDuration,
-    #[msg("Invalid spend limit configuration.")]
-    InvalidSpendLimitConfig,
-    #[msg("Insufficient funds in vault.")]
-    InsufficientVaultFunds,
-    #[msg("Numerical overflow.")]
-    NumericalOverflow,
 }
