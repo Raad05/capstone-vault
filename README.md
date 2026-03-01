@@ -1,6 +1,6 @@
 ### Test Screenshot
 
-<img width="943" height="518" alt="image" src="https://github.com/user-attachments/assets/03a949d3-8f1f-496d-9b52-c63aef3fb5ff" />
+<img width="1092" height="646" alt="image" src="https://github.com/user-attachments/assets/fb64365b-18f5-4653-9aae-1bf46f8dbe30" />
 
 #### Program ID:
 ```yaml
